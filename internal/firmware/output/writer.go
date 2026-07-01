@@ -10,10 +10,13 @@ import (
 
 	"github.com/sercanarga/pcileechgen/internal/board"
 	"github.com/sercanarga/pcileechgen/internal/donor"
+	"github.com/sercanarga/pcileechgen/internal/donor/behavior"
 	"github.com/sercanarga/pcileechgen/internal/firmware"
+	"github.com/sercanarga/pcileechgen/internal/firmware/ahci"
 	"github.com/sercanarga/pcileechgen/internal/firmware/barmodel"
 	"github.com/sercanarga/pcileechgen/internal/firmware/codegen"
 	"github.com/sercanarga/pcileechgen/internal/firmware/devclass"
+	"github.com/sercanarga/pcileechgen/internal/firmware/fallback"
 	"github.com/sercanarga/pcileechgen/internal/firmware/nvme"
 	"github.com/sercanarga/pcileechgen/internal/firmware/overlay"
 	"github.com/sercanarga/pcileechgen/internal/firmware/scrub"
@@ -32,7 +35,20 @@ type OutputWriter struct {
 	Timeout   int
 	StockBar  bool
 	Force     bool
+
+	TimingHistogram *behavior.TimingHistogram
+	ILADepth        int
+	FallbackConfig  *fallback.Config
 }
+
+// DefaultFallbackConfig seeds new OutputWriters with the class-specific BAR
+// register fallbacks (see internal/firmware/fallback). cmd/pcileechgen/build.go
+// sets this once, from --fallback-config or the embedded defaults, before the
+// vivado.Builder it invokes constructs an OutputWriter.
+// ponytail: package-level var, not a threaded field on vivado.BuildOptions/Builder
+// (out of scope here) - fine for the CLI's one-build-per-process usage; revisit
+// if concurrent in-process builds are ever needed.
+var DefaultFallbackConfig *fallback.Config
 
 func NewOutputWriter(outputDir, libDir string, jobs, timeout int) *OutputWriter {
 	if jobs <= 0 {
@@ -42,10 +58,11 @@ func NewOutputWriter(outputDir, libDir string, jobs, timeout int) *OutputWriter 
 		timeout = 3600
 	}
 	return &OutputWriter{
-		OutputDir: outputDir,
-		LibDir:    libDir,
-		Jobs:      jobs,
-		Timeout:   timeout,
+		OutputDir:      outputDir,
+		LibDir:         libDir,
+		Jobs:           jobs,
+		Timeout:        timeout,
+		FallbackConfig: DefaultFallbackConfig,
 	}
 }
 
@@ -67,11 +84,15 @@ func (ow *OutputWriter) WriteAll(ctx *donor.DeviceContext, b *board.Board) error
 		return err
 	}
 
+	if err := ow.writeBARBehaviorProfile(ctx); err != nil {
+		return err
+	}
+
 	if err := ow.writeTCLScripts(ctx, b); err != nil {
 		return err
 	}
 
-	if err := ow.patchSVSources(ctx, b, ids); err != nil {
+	if err := ow.patchSVSources(b, ids); err != nil {
 		return fmt.Errorf("SV patching failed: %w", err)
 	}
 
@@ -89,6 +110,8 @@ func (ow *OutputWriter) WriteAll(ctx *donor.DeviceContext, b *board.Board) error
 			slog.Warn("failed to write diff report", "error", err)
 		}
 	}
+
+	ow.writeCode10Report(ctx, b, ids)
 
 	ow.writeManifest(ctx, ids)
 	return nil
@@ -136,12 +159,20 @@ func (ow *OutputWriter) writeConfigSpaceArtifacts(ctx *donor.DeviceContext, scru
 		codegen.GenerateWritemaskCOE(scrubbedCS)); err != nil {
 		return fmt.Errorf("failed to write writemask COE: %w", err)
 	}
+	if err := ow.writeFile("pcileech_cfgspace_w1cmask.coe",
+		codegen.GenerateW1CMaskCOE(scrubbedCS)); err != nil {
+		return fmt.Errorf("failed to write W1C mask COE: %w", err)
+	}
 
 	msixTableSize := 0
 	if ctx.MSIXData != nil && ctx.MSIXData.TableSize > 0 {
 		msixTableSize = ctx.MSIXData.TableSize
 	}
 	bar0Size := firmware.CappedBAR0Size(ctx, b, msixTableSize)
+
+	if results := fallback.Apply(ow.FallbackConfig, ctx.Device.ClassCode, ctx.BARContents); len(results) > 0 {
+		slog.Info("fallback defaults applied", "modifications", len(results))
+	}
 
 	scrub.ScrubBarContent(ctx.BARContents, ctx.Device.ClassCode, ctx.Device.VendorID, bar0Size)
 	if err := ow.writeFile("pcileech_bar_zero4k.coe",
@@ -154,12 +185,17 @@ func (ow *OutputWriter) writeConfigSpaceArtifacts(ctx *donor.DeviceContext, scru
 // writeTCLScripts generates Vivado project and build TCL scripts.
 func (ow *OutputWriter) writeTCLScripts(ctx *donor.DeviceContext, b *board.Board) error {
 	if err := ow.writeFile("vivado_generate_project.tcl",
-		tclgen.GenerateProjectTCL(ctx, b, ow.LibDir, ow.StockBar)); err != nil {
+		tclgen.GenerateProjectTCL(ctx, b, ow.LibDir, ow.StockBar, ow.ILADepth)); err != nil {
 		return fmt.Errorf("failed to write project TCL: %w", err)
 	}
 	if err := ow.writeFile("vivado_build.tcl",
 		tclgen.GenerateBuildTCL(b, ow.Jobs, ow.Timeout)); err != nil {
 		return fmt.Errorf("failed to write build TCL: %w", err)
+	}
+	if ow.ILADepth > 0 {
+		if err := ow.writeFile("ila_debug.txt", firmware.ILADebugDoc()); err != nil {
+			return fmt.Errorf("failed to write ILA debug doc: %w", err)
+		}
 	}
 	return nil
 }
@@ -200,7 +236,7 @@ var barControllerSubModules = []string{
 
 // patchSVSources copies the board's SV tree (excluding files that will
 // be regenerated), and patches donor IDs into the remaining sources.
-func (ow *OutputWriter) patchSVSources(ctx *donor.DeviceContext, b *board.Board, ids firmware.DeviceIDs) error {
+func (ow *OutputWriter) patchSVSources(b *board.Board, ids firmware.DeviceIDs) error {
 	srcDir := b.SrcPath(ow.LibDir)
 	dstDir := filepath.Join(ow.OutputDir, "src")
 
@@ -233,7 +269,9 @@ func (ow *OutputWriter) patchSVSources(ctx *donor.DeviceContext, b *board.Board,
 		srcFile := filepath.Join(srcDir, "pcileech_tlps128_bar_controller.sv")
 		dstFile := filepath.Join(dstDir, "pcileech_tlps128_bar_controller.sv")
 		if data, err := os.ReadFile(srcFile); err == nil {
-			os.WriteFile(dstFile, data, 0644)
+			if writeErr := os.WriteFile(dstFile, data, 0644); writeErr != nil {
+				return fmt.Errorf("failed to copy stock BAR controller: %w", writeErr)
+			}
 		}
 	}
 
@@ -328,7 +366,9 @@ func ListOutputFiles() []string {
 		"device_context.json",
 		"pcileech_cfgspace.coe",
 		"pcileech_cfgspace_writemask.coe",
+		"pcileech_cfgspace_w1cmask.coe",
 		"pcileech_bar_zero4k.coe",
+		"bar_behavior_profile.json",
 		"vivado_generate_project.tcl",
 		"vivado_build.tcl",
 		"src/",
@@ -343,6 +383,8 @@ func ListOutputFiles() []string {
 		"config_space_init.hex",
 		"msix_table_init.hex",
 		"scrub_diff_report.txt",
+		"code10_report.txt",
+		"ila_debug.txt",
 		"build_manifest.json",
 	}
 }
@@ -423,6 +465,20 @@ func extractMSIInfo(cs *pci.ConfigSpace) *svgen.MSIConfig {
 	return nil
 }
 
+// extraBARPresence reports, for BAR indices 3-6 (result index 0=BAR3 ...
+// 3=BAR6), whether the donor's real hardware has a populated (nonzero-size)
+// BAR there. Used by bar_controller.sv.tmpl to present a real aperture
+// instead of pcileech_bar_impl_none for donors with genuine extra BARs.
+func extraBARPresence(bars []pci.BAR) [4]bool {
+	var present [4]bool
+	for _, bar := range bars {
+		if idx := bar.Index - 3; idx >= 0 && idx < 4 && !bar.IsDisabled() {
+			present[idx] = true
+		}
+	}
+	return present
+}
+
 // buildSVConfig assembles the SVGeneratorConfig from donor context.
 func (ow *OutputWriter) buildSVConfig(ctx *donor.DeviceContext, scrubbedCS *pci.ConfigSpace, ids firmware.DeviceIDs, entropy uint32, b *board.Board) (*svgen.SVGeneratorConfig, error) {
 	// Use the same BAR index for content data and probe profile to avoid
@@ -444,7 +500,12 @@ func (ow *OutputWriter) buildSVConfig(ctx *donor.DeviceContext, scrubbedCS *pci.
 	bm := barmodel.BuildBARModel(barData, ctx.Device.ClassCode, barProfile)
 	slog.Info("BAR model built",
 		"model_nil", bm == nil,
-		"reg_count", func() int { if bm != nil { return len(bm.Registers) }; return 0 }(),
+		"reg_count", func() int {
+			if bm != nil {
+				return len(bm.Registers)
+			}
+			return 0
+		}(),
 	)
 
 	strategy := devclass.StrategyForClassAndVendor(ctx.Device.ClassCode, ids.VendorID)
@@ -468,15 +529,21 @@ func (ow *OutputWriter) buildSVConfig(ctx *donor.DeviceContext, scrubbedCS *pci.
 	}
 
 	cfg := &svgen.SVGeneratorConfig{
-		DeviceIDs:     ids,
-		BARModel:      bm,
-		ClassCode:     ctx.Device.ClassCode,
-		LatencyConfig: svgen.DefaultLatencyConfig(ctx.Device.ClassCode),
-		HasMSIX:       bm != nil,
-		BuildEntropy:  entropy,
-		PRNGSeeds:     svgen.BuildPRNGSeeds(ids.VendorID, ids.DeviceID, entropy),
-		DeviceClass:   devClass,
-		Bar0Size:      bar0Size,
+		DeviceIDs:         ids,
+		DonorCapabilities: extractDonorCapabilities(scrubbedCS),
+		BARModel:          bm,
+		ClassCode:         ctx.Device.ClassCode,
+		LatencyConfig:     svgen.LatencyConfigFromHistogram(ow.TimingHistogram, ctx.Device.ClassCode),
+		HasMSIX:           bm != nil,
+		BuildEntropy:      entropy,
+		PRNGSeeds:         svgen.BuildPRNGSeeds(ids.VendorID, ids.DeviceID, entropy),
+		DeviceClass:       devClass,
+		Bar0Size:          bar0Size,
+		ExtraBARPresent:   extraBARPresence(ctx.BARs),
+	}
+
+	if ow.ILADepth > 0 {
+		cfg.ILAInstanceSV = firmware.ILAInstanceSV()
 	}
 
 	if devClass == devclass.ClassNVMe {
@@ -516,11 +583,15 @@ func (ow *OutputWriter) buildSVConfig(ctx *donor.DeviceContext, scrubbedCS *pci.
 	// Validate *donor demand* (may exceed) against board BRAM; error unless --force.
 	// (bar0Size is the Capped value actually used for artifacts/scrub/SV.)
 	if issues := ValidateBARSize(donorBar, bram, 0); len(issues) > 0 {
-		if !ow.Force { return nil, fmt.Errorf("%s", issues[0]) }
+		if !ow.Force {
+			return nil, fmt.Errorf("%s", issues[0])
+		}
 	}
 	if cfg.MSIXConfig != nil {
 		if issues := ValidateBARSize(donorBar, bram, cfg.MSIXConfig.TableOffset); len(issues) > 0 {
-			if !ow.Force { return nil, fmt.Errorf("%s", issues[0]) }
+			if !ow.Force {
+				return nil, fmt.Errorf("%s", issues[0])
+			}
 		}
 	}
 
@@ -571,8 +642,8 @@ func (ow *OutputWriter) writeConditionalArtifacts(cfg *svgen.SVGeneratorConfig, 
 		if err != nil {
 			return fmt.Errorf("generating pcileech_nvme_admin_responder.sv: %w", err)
 		}
-		if err := ow.writeFile("pcileech_nvme_admin_responder.sv", nvmeSV); err != nil {
-			return err
+		if writeErr := ow.writeFile("pcileech_nvme_admin_responder.sv", nvmeSV); writeErr != nil {
+			return writeErr
 		}
 
 		bridgeSV, err := svgen.GenerateNVMeDMABridgeSV(cfg)
@@ -588,13 +659,33 @@ func (ow *OutputWriter) writeConditionalArtifacts(cfg *svgen.SVGeneratorConfig, 
 		}
 	}
 
+	if cfg.DeviceClass == devclass.ClassSATA {
+		model := "PCILeech SATA Disk"
+		serial := fmt.Sprintf("PL%012X", cfg.DeviceIDs.DSN&0xFFFFFFFFFFFF)
+		const sataSectors = uint64(0x1D1C0000) // ~250 GB at 512 B/sector
+		idw := ahci.BuildIdentify(model, serial, "1.0", sataSectors)
+		if err := ow.writeFile("ahci_identify_init.hex", ahci.IdentifyHex(idw)); err != nil {
+			return err
+		}
+	}
+
+	if cfg.DeviceClass == devclass.ClassXHCI && cfg.BARModel != nil {
+		xhciSV, err := svgen.GenerateXHCIRingEngineSV(cfg)
+		if err != nil {
+			return fmt.Errorf("generating pcileech_xhci_ring_engine.sv: %w", err)
+		}
+		if err := ow.writeFile("pcileech_xhci_ring_engine.sv", xhciSV); err != nil {
+			return err
+		}
+	}
+
 	if cfg.DeviceClass == devclass.ClassAudio && cfg.BARModel != nil {
 		hdaSV, err := svgen.GenerateHDARIRBDMASV(cfg)
 		if err != nil {
 			return fmt.Errorf("generating pcileech_hda_rirb_dma.sv: %w", err)
 		}
-		if err := ow.writeFile("pcileech_hda_rirb_dma.sv", hdaSV); err != nil {
-			return err
+		if writeErr := ow.writeFile("pcileech_hda_rirb_dma.sv", hdaSV); writeErr != nil {
+			return writeErr
 		}
 
 		// MSI interrupt generator for HDA - critical for driver completion.
@@ -622,6 +713,9 @@ func (ow *OutputWriter) logSVSummary(cfg *svgen.SVGeneratorConfig) {
 		}
 	case devclass.ClassXHCI:
 		features = append(features, "xHCI FSM")
+		if cfg.BARModel != nil {
+			features = append(features, "xHCI Ring Engine", "xHCI DMA Bridge")
+		}
 	case devclass.ClassAudio:
 		features = append(features, "HD Audio FSM", "RIRB DMA Bridge")
 		if cfg.MSIConfig != nil {
@@ -635,6 +729,18 @@ func (ow *OutputWriter) logSVSummary(cfg *svgen.SVGeneratorConfig) {
 		features = append(features, fmt.Sprintf("%d registers", len(cfg.BARModel.Registers)))
 	} else {
 		features = append(features, "BRAM fallback")
+	}
+	if cfg.DonorCapabilities.HasPMCap {
+		features = append(features, "donor PM cap")
+	}
+	if cfg.DonorCapabilities.HasMSICap {
+		features = append(features, "donor MSI cap")
+	}
+	if cfg.DonorCapabilities.HasMSIXCap {
+		features = append(features, "donor MSI-X cap")
+	}
+	if cfg.DonorCapabilities.HasPCIeCap {
+		features = append(features, "donor PCIe cap")
 	}
 	features = append(features, "latency emulator", "interrupt controller")
 	slog.Info("SV modules generated", "features", strings.Join(features, ", "))

@@ -8,8 +8,6 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
-	"strconv"
-	"strings"
 	"time"
 )
 
@@ -33,22 +31,22 @@ func LiveTrace(bdf string, duration time.Duration) (*TraceResult, error) {
 		return nil, fmt.Errorf("cannot read current tracer: %w", err)
 	}
 	defer func() {
-		if err := os.WriteFile(currentTracer, prevTracer, 0644); err != nil {
-			slog.Warn("failed to restore tracer", "error", err)
+		if writeErr := os.WriteFile(currentTracer, prevTracer, 0644); writeErr != nil {
+			slog.Warn("failed to restore tracer", "error", writeErr)
 		}
 	}()
 
 	// switch to mmiotrace
-	if err := os.WriteFile(currentTracer, []byte("mmiotrace"), 0644); err != nil {
-		return nil, fmt.Errorf("cannot enable mmiotrace (CONFIG_MMIOTRACE=y needed): %w", err)
+	if writeErr := os.WriteFile(currentTracer, []byte("mmiotrace"), 0644); writeErr != nil {
+		return nil, fmt.Errorf("cannot enable mmiotrace (CONFIG_MMIOTRACE=y needed): %w", writeErr)
 	}
 
-	if err := os.WriteFile(tracingOnPath, []byte("1"), 0644); err != nil {
-		slog.Warn("failed to enable tracing", "error", err)
+	if writeErr := os.WriteFile(tracingOnPath, []byte("1"), 0644); writeErr != nil {
+		slog.Warn("failed to enable tracing", "error", writeErr)
 	}
 	defer func() {
-		if err := os.WriteFile(tracingOnPath, []byte("0"), 0644); err != nil {
-			slog.Warn("failed to disable tracing", "error", err)
+		if writeErr := os.WriteFile(tracingOnPath, []byte("0"), 0644); writeErr != nil {
+			slog.Warn("failed to disable tracing", "error", writeErr)
 		}
 	}()
 
@@ -98,44 +96,5 @@ func LiveTrace(bdf string, duration time.Duration) (*TraceResult, error) {
 
 // parseMMIOTraceLine parses one mmiotrace line (R/W <width> <ts> <addr> <val>).
 func parseMMIOTraceLine(line string) (AccessRecord, bool) {
-	line = strings.TrimSpace(line)
-	// mmiotrace lines typically look like:
-	// R 4 1234567.890 0xfee00000 0x00000001 ...
-	// W 4 1234567.890 0xfee00000 0x00000001 ...
-	fields := strings.Fields(line)
-	if len(fields) < 5 {
-		return AccessRecord{}, false
-	}
-
-	var rec AccessRecord
-
-	switch fields[0] {
-	case "R":
-		rec.Type = AccessRead
-	case "W":
-		rec.Type = AccessWrite
-	default:
-		return AccessRecord{}, false
-	}
-
-	// lower 12 bits = offset within 4K BAR page
-	addr, err := strconv.ParseUint(strings.TrimPrefix(fields[3], "0x"), 16, 64)
-	if err != nil {
-		return AccessRecord{}, false
-	}
-	rec.Offset = uint32(addr & 0xFFF) // BAR offset within 4K page
-
-	// Parse value
-	val, err := strconv.ParseUint(strings.TrimPrefix(fields[4], "0x"), 16, 32)
-	if err != nil {
-		return AccessRecord{}, false
-	}
-	rec.Value = uint32(val)
-
-	// Parse timestamp if available
-	if ts, err := strconv.ParseFloat(fields[2], 64); err == nil {
-		rec.Timestamp = time.Duration(ts * float64(time.Second))
-	}
-
-	return rec, true
+	return parseTextTraceLine(line, 0)
 }

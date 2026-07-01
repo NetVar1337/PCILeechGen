@@ -37,7 +37,7 @@ func TestGenerateProjectTCL(t *testing.T) {
 		BARs:            []pci.BAR{},
 	}
 
-	tcl := GenerateProjectTCL(ctx, b, "/tmp/lib", false)
+	tcl := GenerateProjectTCL(ctx, b, "/tmp/lib", false, 0)
 
 	if !strings.Contains(tcl, "8086") {
 		t.Error("TCL should contain vendor ID")
@@ -56,6 +56,9 @@ func TestGenerateProjectTCL(t *testing.T) {
 	}
 	if strings.Contains(tcl, "MORE OPTIONS") {
 		t.Error("TCL should not use MORE OPTIONS for seed")
+	}
+	if !strings.Contains(tcl, "src/*.v") {
+		t.Error("TCL should glob src/*.v (ZDMA/GBOX ship pcileech_com as pcileech_com_e.v)")
 	}
 }
 
@@ -106,7 +109,8 @@ func TestClampLinkWidth(t *testing.T) {
 }
 
 func TestBarSizeToTCL(t *testing.T) {
-	k4 := uint64(4096); scale, size := barSizeToTCL(k4)
+	k4 := uint64(4096)
+	scale, size := barSizeToTCL(k4)
 	if scale != "Kilobytes" || size != "4" {
 		t.Errorf("4KB: got %s/%s, want Kilobytes/4", scale, size)
 	}

@@ -22,6 +22,7 @@ type MSIConfig struct {
 // SVGeneratorConfig is the input data for all SV template renders.
 type SVGeneratorConfig struct {
 	DeviceIDs          firmware.DeviceIDs
+	DonorCapabilities  DonorCapabilities  // donor capability summary for donor-emulation visibility
 	BARModel           *barmodel.BARModel // nil = generic fallback (uses BRAM-based zerowrite4k)
 	ClassCode          uint32
 	LatencyConfig      *LatencyConfig     // TLP response timing (nil = no latency emulator)
@@ -34,6 +35,43 @@ type SVGeneratorConfig struct {
 	NVMeIdentify       *nvme.IdentifyData // NVMe Identify Controller/Namespace data (nil = no responder)
 	NVMeDoorbellStride uint32             // CAP.DSTRD - doorbell stride (0 = 4B, default)
 	Bar0Size           int
+	ILAInstanceSV      string
+	// ExtraBARPresent flags donor BAR3-6 presence: index 0=BAR3 ... 3=BAR6.
+	// true = donor's real hardware has a populated (nonzero-size) BAR there,
+	// so bar_controller.sv.tmpl presents a real (loopaddr) aperture instead
+	// of pcileech_bar_impl_none. Zero value (all false) preserves the old
+	// always-none behavior.
+	ExtraBARPresent [4]bool
+}
+
+// DonorCapabilities summarizes parsed capabilities from donor config space.
+// Values are best-effort snapshots used by generated SV for optional emulation
+// behavior and debugging visibility.
+type DonorCapabilities struct {
+	HasPMCap         bool
+	HasMSICap        bool
+	HasMSIXCap       bool
+	HasPCIeCap       bool
+	PMCapOffset      uint16
+	MSICapOffset     uint16
+	MSIXCapOffset    uint16
+	PCIeCapOffset    uint16
+	PMESupportMask   uint8
+	PMEDefault       bool
+	MSIDisable64Bit  bool
+	MSIMultipleMsg   uint8
+	PCIELinkSpeed    uint8
+	PCIELinkWidth    uint8
+	PCIeASPMCap      uint8
+	PCIeASPMEnable   uint8
+	HasLTRCap        bool
+	HasL1PMSubstates bool
+	HasAERCap        bool
+	HasDSNCap        bool
+	AERCapOffset     uint16
+	LTRCapOffset     uint16
+	L1PMCapOffset    uint16
+	DSNCapOffset     uint16
 }
 
 // NVMeSQ0DoorbellOffset returns the byte offset of the SQ0 tail doorbell.
@@ -51,6 +89,18 @@ func (c *SVGeneratorConfig) NVMeCQ0DoorbellOffset() uint32 {
 	stride := uint32(4) << c.NVMeDoorbellStride
 	dbBase := uint32(board.DefaultBRAMSize)
 	return dbBase + 1*stride
+}
+
+func (c *SVGeneratorConfig) NVMeSQ1DoorbellOffset() uint32 {
+	stride := uint32(4) << c.NVMeDoorbellStride
+	dbBase := uint32(board.DefaultBRAMSize)
+	return dbBase + 2*stride
+}
+
+func (c *SVGeneratorConfig) NVMeCQ1DoorbellOffset() uint32 {
+	stride := uint32(4) << c.NVMeDoorbellStride
+	dbBase := uint32(board.DefaultBRAMSize)
+	return dbBase + 3*stride
 }
 
 func renderTemplate(name string, data any) (string, error) {
@@ -95,6 +145,12 @@ func GenerateNVMeDMABridgeSV(cfg *SVGeneratorConfig) (string, error) {
 	return renderTemplate("nvme_dma_bridge", cfg)
 }
 
+// GenerateXHCIRingEngineSV renders the xHCI Command/Event ring engine and its
+// DMA bridge (both modules live in the same template file).
+func GenerateXHCIRingEngineSV(cfg *SVGeneratorConfig) (string, error) {
+	return renderTemplate("xhci_ring_engine", cfg)
+}
+
 // GenerateHDARIRBDMASV renders the HDA RIRB DMA bridge module.
 func GenerateHDARIRBDMASV(cfg *SVGeneratorConfig) (string, error) {
 	return renderTemplate("hda_rirb_dma", cfg)
@@ -117,12 +173,21 @@ func svFuncMap() template.FuncMap {
 		"hex04":         func(v uint16) string { return fmt.Sprintf("%04X", v) },
 		"hex02":         func(v uint8) string { return fmt.Sprintf("%02X", v) },
 		"sub":           func(a, b int) int { return a - b },
+		"add":           func(a, b int) int { return a + b },
 		"mul":           func(a, b int) int { return a * b },
 		"alignedOffset": func(off uint32) uint32 { return (off / 4) * 4 },
 		"classBase":     func(cc uint32) uint8 { return uint8((cc >> 16) & 0xFF) },
 		"classSub":      func(cc uint32) uint8 { return uint8((cc >> 8) & 0xFF) },
 		"classProgIF":   func(cc uint32) uint8 { return uint8(cc & 0xFF) },
 		"rwMaskBytes": func(mask uint32) [4]uint8 {
+			return [4]uint8{
+				uint8(mask & 0xFF),
+				uint8((mask >> 8) & 0xFF),
+				uint8((mask >> 16) & 0xFF),
+				uint8((mask >> 24) & 0xFF),
+			}
+		},
+		"w1cMaskBytes": func(mask uint32) [4]uint8 {
 			return [4]uint8{
 				uint8(mask & 0xFF),
 				uint8((mask >> 8) & 0xFF),

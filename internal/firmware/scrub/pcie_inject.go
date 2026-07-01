@@ -61,7 +61,7 @@ func findFreeCapSpace(cs *pci.ConfigSpace, caps []pci.Capability, needed int) in
 func buildPCIeCapData(b *board.Board) [pcieCapSize]byte {
 	var data [pcieCapSize]byte
 
-	maxSpeed := uint8(firmware.LinkSpeedGen2)
+	maxSpeed := firmware.LinkSpeedGen2
 	maxWidth := uint8(1)
 	if b != nil {
 		maxSpeed = b.MaxLinkSpeedOrDefault()
@@ -97,7 +97,7 @@ func buildPCIeCapData(b *board.Board) [pcieCapSize]byte {
 	linkCap := uint32(maxSpeed) |
 		(uint32(maxWidth) << 4) |
 		(6 << 12) | // L0s exit latency
-		(6 << 15)   // L1 exit latency
+		(6 << 15) // L1 exit latency
 	binary.LittleEndian.PutUint32(data[0x0C:], linkCap)
 
 	// Link Control (cap+0x10) = 0x0000 (no ASPM)
@@ -160,8 +160,7 @@ func injectPCIeCapIfMissing(cs *pci.ConfigSpace, b *board.Board, om *overlay.Map
 		om.WriteU16(0x06, status|0x0010, "set Capabilities List bit in Status")
 	}
 
-	// ensure CapPtr is valid when there are no existing caps
-	if len(ctx.Caps) == 0 && cs.CapabilityPointer() == 0 {
+	if len(ctx.Caps) == 0 {
 		slog.Info("donor has no capability chain, creating minimal PM + MSI + PCIe chain")
 		injectFullCapChain(cs, b, om, ctx)
 		return

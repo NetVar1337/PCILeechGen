@@ -3,7 +3,6 @@ package main
 import (
 	"fmt"
 	"io"
-	"os"
 	"strings"
 	"time"
 
@@ -33,7 +32,7 @@ Example:
 			return fmt.Errorf("invalid BDF: %w", err)
 		}
 
-		c := &checker{bdf: bdf, sysfs: donor.NewSysfsReader(), w: os.Stdout}
+		c := &checker{bdf: bdf, sysfs: donor.NewSysfsReader(), w: humanWriter()}
 		return c.run()
 	},
 }
@@ -150,8 +149,8 @@ func (c *checker) checkPowerState() {
 
 	// attempt auto-wake
 	fmt.Fprintf(c.w, color.Dim("Power state: %s - attempting D0 wake...\n"), ps)
-	if err := vfio.WakeToD0(c.bdf.String()); err != nil {
-		fmt.Fprintln(c.w, color.Failf("Power state: %s - failed to wake device: %v", ps, err))
+	if wakeErr := vfio.WakeToD0(c.bdf.String()); wakeErr != nil {
+		fmt.Fprintln(c.w, color.Failf("Power state: %s - failed to wake device: %v", ps, wakeErr))
 		c.issues++
 		return
 	}

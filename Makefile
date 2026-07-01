@@ -1,4 +1,4 @@
-.PHONY: build test lint clean install
+.PHONY: build test lint clean install fixtures hdl-lint sim
 
 BINARY_NAME=pcileechgen
 BUILD_DIR=bin
@@ -30,6 +30,19 @@ lint:
 clean:
 	rm -rf $(BUILD_DIR)
 	rm -f coverage.out coverage.html
+
+# generate synthetic donor fixture jsons
+fixtures: build
+	$(BUILD_DIR)/$(BINARY_NAME) fixtures --out testdata/donors
+
+sim:
+	@command -v iverilog >/dev/null 2>&1 || { echo "iverilog not installed (apt-get install iverilog)"; exit 1; }
+	./sim/run.sh
+
+# lint generated sv with verilator
+hdl-lint: build
+	@command -v verilator >/dev/null 2>&1 || { echo "verilator not installed; see Makefile"; exit 1; }
+	./scripts/hdl-lint.sh
 
 # Install binary to GOPATH/bin
 install:

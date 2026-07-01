@@ -2,8 +2,10 @@
 package vivado
 
 import (
+	"bytes"
 	"context"
 	"fmt"
+	"io"
 	"log/slog"
 	"os"
 	"os/exec"
@@ -95,19 +97,26 @@ func (v *Vivado) BinaryPath() string {
 	return filepath.Join(v.Path, "bin", "vivado")
 }
 
-// RunTCL executes a TCL script in Vivado batch mode with a timeout.
+// RunTCL executes a TCL script in Vivado batch mode with a timeout. Under sudo
+// the invoking user's license env is recovered via envOverrides; otherwise it's
+// a no-op.
 func (v *Vivado) RunTCL(tclScript string, workDir string, timeout time.Duration) error {
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
 
 	cmd := exec.CommandContext(ctx, v.BinaryPath(), "-mode", "batch", "-notrace", "-source", tclScript)
 	cmd.Dir = workDir
-	cmd.Stdout = os.Stdout
-	cmd.Stderr = os.Stderr
+	var output bytes.Buffer
+	cmd.Stdout = io.MultiWriter(os.Stdout, &output)
+	cmd.Stderr = io.MultiWriter(os.Stderr, &output)
 
-	// Set up environment
 	env := os.Environ()
-	env = append(env, fmt.Sprintf("XILINX_VIVADO=%s", v.Path))
+	ov, err := envOverrides()
+	if err != nil {
+		return err
+	}
+	env = applyOverrides(env, ov)
+	env = setEnv(env, "XILINX_VIVADO", v.Path)
 	cmd.Env = env
 
 	slog.Info("running Vivado", "cmd", strings.Join(cmd.Args, " "), "dir", workDir, "timeout", timeout)
@@ -119,5 +128,22 @@ func (v *Vivado) RunTCL(tclScript string, workDir string, timeout time.Duration)
 		return fmt.Errorf("Vivado execution failed: %w", err)
 	}
 
+	if line, ok := vivadoStartupFailure(output.String()); ok {
+		return fmt.Errorf("Vivado startup failed: %s", line)
+	}
+
 	return nil
+}
+
+func vivadoStartupFailure(output string) (string, bool) {
+	for _, line := range strings.Split(output, "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		if strings.Contains(line, "application-specific initialization failed") {
+			return line, true
+		}
+	}
+	return "", false
 }

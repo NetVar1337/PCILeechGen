@@ -109,9 +109,13 @@ func TestValidateOutputDir_WithFiles(t *testing.T) {
 	tmpDir := t.TempDir()
 	for _, name := range ListOutputFiles() {
 		if strings.HasSuffix(name, "/") {
-			os.MkdirAll(filepath.Join(tmpDir, name), 0755)
+			if err := os.MkdirAll(filepath.Join(tmpDir, name), 0755); err != nil {
+				t.Fatal(err)
+			}
 		} else {
-			os.WriteFile(filepath.Join(tmpDir, name), []byte("content"), 0644)
+			if err := os.WriteFile(filepath.Join(tmpDir, name), []byte("content"), 0644); err != nil {
+				t.Fatal(err)
+			}
 		}
 	}
 
@@ -123,7 +127,9 @@ func TestValidateOutputDir_WithFiles(t *testing.T) {
 
 func TestValidateOutputDir_EmptyFile(t *testing.T) {
 	tmpDir := t.TempDir()
-	os.WriteFile(filepath.Join(tmpDir, "pcileech_cfgspace.coe"), []byte(""), 0644)
+	if err := os.WriteFile(filepath.Join(tmpDir, "pcileech_cfgspace.coe"), []byte(""), 0644); err != nil {
+		t.Fatal(err)
+	}
 
 	result := ValidateOutputDir(tmpDir)
 	foundEmpty := false
@@ -238,7 +244,11 @@ func TestValidationResult_Summary(t *testing.T) {
 	}
 }
 
-func TestValidateBARSizeExceed(t *testing.T){if e:=ValidateBARSize(8192,4096,0);len(e)==0{t.Error("ValidateBARSize(exceed) should report")}}
+func TestValidateBARSizeExceed(t *testing.T) {
+	if e := ValidateBARSize(8192, 4096, 0); len(e) == 0 {
+		t.Error("ValidateBARSize(exceed) should report")
+	}
+}
 
 // TestValidateBARSize_ExceedWithForce covers the exceed case (force logic lives in writer.buildSVConfig using len(issues) && !ow.Force)
 func TestValidateBARSize_ExceedWithForce(t *testing.T) {
@@ -269,11 +279,11 @@ func TestLargeBAR_CmdPathRepro(t *testing.T) {
 	barData := make([]byte, 16384)
 	barData[0], barData[100] = 0xDE, 0xAD
 	ctx := &donor.DeviceContext{
-		Device:      pci.PCIDevice{VendorID: 0x10DE, DeviceID: 0x1234, ClassCode: 0x030000, RevisionID: 0xA1},
-		ConfigSpace: pci.NewConfigSpace(),
-		BARs:        []pci.BAR{{Index: 0, Size: 16384, Type: pci.BARTypeMem32, RawValue: 0x00000000}},
-		BARContents: map[int][]byte{0: barData},
-		Capabilities: []pci.Capability{},
+		Device:          pci.PCIDevice{VendorID: 0x10DE, DeviceID: 0x1234, ClassCode: 0x030000, RevisionID: 0xA1},
+		ConfigSpace:     pci.NewConfigSpace(),
+		BARs:            []pci.BAR{{Index: 0, Size: 16384, Type: pci.BARTypeMem32, RawValue: 0x00000000}},
+		BARContents:     map[int][]byte{0: barData},
+		Capabilities:    []pci.Capability{},
 		ExtCapabilities: []pci.ExtCapability{},
 	}
 
@@ -284,9 +294,8 @@ func TestLargeBAR_CmdPathRepro(t *testing.T) {
 	if donorDemand != 16384 || bar0Sz != 4096 {
 		t.Fatalf("build trace: demand/capped 16k@4k want 16384/4096 got %d/%d", donorDemand, bar0Sz)
 	}
-	if donorDemand > b4k.BRAMSizeOrDefault() {
-		// without force -> error (as in runBuild)
-		// with force -> warn + proceed (bar0Sz used for scrub/writer)
+	if donorDemand <= b4k.BRAMSizeOrDefault() {
+		t.Fatal("test setup should require force for the 4KB board")
 	}
 
 	// writer buildSVConfig pattern: Validate(donor) w/ Force
@@ -305,17 +314,15 @@ func TestLargeBAR_CmdPathRepro(t *testing.T) {
 	donorV := firmware.DonorBAR0Demand(ctx, b4k, msixSz)
 	bar0V := firmware.CappedBAR0Size(ctx, b4k, msixSz)
 	_ = bar0V // used for scrub in validator
-	if b := b4k; b != nil {
-		if iss := ValidateBARSize(donorV, b.BRAMSizeOrDefault(), 0); len(iss) > 0 {
-			// returns fmt err(iss[0]) -- always, no force param in validate
-			if iss[0] == "" {
-				t.Error("validate must surface the Bar0Size exceed msg")
-			}
+	if iss := ValidateBARSize(donorV, b4k.BRAMSizeOrDefault(), 0); len(iss) > 0 {
+		// returns fmt err(iss[0]) -- always, no force param in validate
+		if iss[0] == "" {
+			t.Error("validate must surface the Bar0Size exceed msg")
 		}
 	}
 
 	// === tclgen (called from writer.writeTCLScripts) : StockBar forces zerowrite, reports correct Bar0ByteSize ===
-	tclStock := tclgen.GenerateProjectTCL(ctx, b4k, "/tmp/lib", true /*stock*/)
+	tclStock := tclgen.GenerateProjectTCL(ctx, b4k, "/tmp/lib", true /*stock*/, 0)
 	if !strings.Contains(tclStock, "&& 0") {
 		t.Error("--stock-bar must render &&0 to use zerowrite4k path (no donor coe patch)")
 	}
@@ -324,14 +331,14 @@ func TestLargeBAR_CmdPathRepro(t *testing.T) {
 		t.Error("tcl must report Bar0 config (correct donor Bar0ByteSize even under stock)")
 	}
 
-	tclForceOversz := tclgen.GenerateProjectTCL(ctx, b4k, "/tmp/lib", false)
+	tclForceOversz := tclgen.GenerateProjectTCL(ctx, b4k, "/tmp/lib", false, 0)
 	// Bar0ByteSize demand=16k >4k => &&0 , but correct size used for IP bar config
 	if !strings.Contains(tclForceOversz, "CONFIG.Bar0_Size") {
 		t.Error("oversized (force) must still set correct donor Bar0_Size in PCIe IP")
 	}
 
 	// fitting case on large board still >4k so zerowrite for bram_ip (custom handles)
-	tclFit := tclgen.GenerateProjectTCL(ctx, b16k, "/tmp/lib", false)
+	tclFit := tclgen.GenerateProjectTCL(ctx, b16k, "/tmp/lib", false, 0)
 	if !strings.Contains(tclFit, "&& 0") {
 		t.Log("note: large fitting may or not skip based on size; current >4k always skips patch for bram_ip")
 	}
@@ -340,9 +347,8 @@ func TestLargeBAR_CmdPathRepro(t *testing.T) {
 	// boards cmd shows BRAM column explicitly
 	// check uses largest from resource, errors/warns per checkForce, shows note "(donor BAR X > board BRAM Y)"
 	largestBAR := uint64(16384)
-	if uint64(b4k.BRAMSizeOrDefault()) < largestBAR {
-		// !checkForce => issues++ , label Fail , note with mismatch
-		// checkForce => label Warn
+	if uint64(b4k.BRAMSizeOrDefault()) >= largestBAR {
+		t.Error("test setup should model a donor BAR larger than board BRAM")
 	}
 
 	// === reproduce: final artifacts use correct size (capped) ===

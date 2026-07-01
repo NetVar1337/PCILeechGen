@@ -34,15 +34,16 @@ type projectTCLData struct {
 	LinkWidth     string
 	TrgtLinkSpeed string
 
-	Bar0Enabled bool
-	Bar0Size    string
-	Bar0Scale   string
-	Bar064bit   bool
+	Bar0Enabled  bool
+	Bar0Size     string
+	Bar0Scale    string
+	Bar064bit    bool
 	Bar0ByteSize int
-	StockBar    bool
+	StockBar     bool
 
 	DSNEnabled       bool
 	MSICapVectorsStr string
+	ILABlock         string
 
 	// MSI-X
 	MSIXEnabled     bool
@@ -110,7 +111,7 @@ func buildBAR0Config(bar0Size int, ctx *donor.DeviceContext) bar0Config {
 // generated TCL (no donor content patch into bram_bar_zero4k), while still
 // reporting the correct (donor-demanded) Bar0ByteSize for PCIe IP BAR sizing
 // and other config. This matches --stock-bar CLI semantics.
-func GenerateProjectTCL(ctx *donor.DeviceContext, b *board.Board, libDir string, stockBar bool) string {
+func GenerateProjectTCL(ctx *donor.DeviceContext, b *board.Board, libDir string, stockBar bool, ilaDepth int) string {
 	ids := firmware.ExtractDeviceIDs(ctx.ConfigSpace, ctx.ExtCapabilities)
 
 	// Use the board's max link speed for the Xilinx IP core.
@@ -165,6 +166,10 @@ func GenerateProjectTCL(ctx *donor.DeviceContext, b *board.Board, libDir string,
 		MSICapVectorsStr: msiVectorsToTCL(msiVectors),
 	}
 
+	if ilaDepth > 0 {
+		data.ILABlock = firmware.ILACreateIPTCL(ilaDepth)
+	}
+
 	if ctx.MSIXData != nil && ctx.MSIXData.TableSize > 0 {
 		data.MSIXEnabled = true
 		data.MSIXTableSize = ctx.MSIXData.TableSize - 1
@@ -172,7 +177,7 @@ func GenerateProjectTCL(ctx *donor.DeviceContext, b *board.Board, libDir string,
 		is64 := bar0.Is64bit && bir == 0
 		data.MSIXTableBIR = barBIRToTCL(bir, is64)
 		dstrd := uint32(0)
-		if bar0d := firmware.LargestBar(ctx.BARContents); bar0d != nil && len(bar0d) >= 8 {
+		if bar0d := firmware.LargestBar(ctx.BARContents); len(bar0d) >= 8 {
 			dstrd = binary.LittleEndian.Uint32(bar0d[4:8]) & 0x0F
 		}
 		tableOff, pbaOffset, _ := firmware.MSIXPlacement(bar0Size, ctx.MSIXData.TableSize, ctx.Device.ClassCode, dstrd)
