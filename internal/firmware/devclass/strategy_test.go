@@ -283,11 +283,11 @@ func TestXHCIStrategy_ScrubBAR(t *testing.T) {
 
 	s.ScrubBAR(data)
 
-	if data[0x20]&0x01 != 0x01 {
-		t.Error("USBCMD R/S should be set")
+	if data[0x20]&0x03 != 0 {
+		t.Error("USBCMD should reset with R/S and HCRST clear")
 	}
-	if data[0x24] != 0x00 {
-		t.Errorf("USBSTS should be cleared, got 0x%02X", data[0x24])
+	if data[0x24]&0x01 == 0 {
+		t.Errorf("USBSTS HCH should be set, got 0x%02X", data[0x24])
 	}
 	// DBOFF should be clamped
 	dboff := uint32(data[0x14]) | uint32(data[0x15])<<8
@@ -588,11 +588,11 @@ func TestXHCIStrategy_PostInitRegisters(t *testing.T) {
 	var usbsts uint32 = 0x01
 	regs := map[uint32]*uint32{0x20: &usbcmd, 0x24: &usbsts}
 	s.PostInitRegisters(regs)
-	if usbcmd&0x01 == 0 {
-		t.Error("USBCMD R/S should be set")
+	if usbcmd&0x03 != 0 {
+		t.Error("USBCMD should reset with R/S and HCRST clear")
 	}
-	if usbsts&0x01 != 0 {
-		t.Error("USBSTS HCH should be cleared")
+	if usbsts&0x01 == 0 {
+		t.Error("USBSTS HCH should be set")
 	}
 }
 

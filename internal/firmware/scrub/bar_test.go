@@ -32,11 +32,14 @@ func TestScrubBarContent_XHCI(t *testing.T) {
 	barContents := map[int][]byte{0: barData}
 	ScrubBarContent(barContents, 0x0C0330, 0, 4096)
 
-	// USBCMD R/S should be set
+	// Controller should reset halted until the host programs and starts it.
 	capLen := int(barData[0x00])
 	usbcmd := util.ReadLE32(barData, capLen)
-	if usbcmd&0x01 == 0 {
-		t.Error("xHCI USBCMD R/S should be set")
+	if usbcmd&0x03 != 0 {
+		t.Error("xHCI USBCMD should reset with R/S and HCRST clear")
+	}
+	if util.ReadLE32(barData, capLen+4)&0x01 == 0 {
+		t.Error("xHCI USBSTS HCH should be set")
 	}
 }
 
@@ -175,11 +178,11 @@ func TestXhciSetOperationalState(t *testing.T) {
 		t.Errorf("PAGESIZE = %d, want 1", pageSize)
 	}
 	usbcmd := util.ReadLE32(data, capLen)
-	if usbcmd&0x01 == 0 {
-		t.Error("USBCMD R/S should be set")
+	if usbcmd&0x03 != 0 {
+		t.Error("USBCMD should reset with R/S and HCRST clear")
 	}
-	if usbcmd&0x02 != 0 {
-		t.Error("USBCMD HCRST should be cleared")
+	if util.ReadLE32(data, capLen+4)&0x01 == 0 {
+		t.Error("USBSTS HCH should be set")
 	}
 }
 

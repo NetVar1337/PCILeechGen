@@ -129,8 +129,8 @@ module pcileech_bar_impl_device #(
             hcrst_cnt      <= 4'h0;
             hcrst_pending  <= 1'b0;
             rs_prev        <= 1'b0;
-            reg_0x00000020 <= 32'h00000001;  // USBCMD: R/S=1 (running)
-            reg_0x00000024 <= 32'h00000000;  // USBSTS: HCH=0 (not halted)
+            reg_0x00000020 <= 32'h00000000;  // USBCMD: halted, host owns R/S
+            reg_0x00000024 <= 32'h00000001;  // USBSTS: HCH=1
         end else begin
             rs_prev <= reg_0x00000020[0]; // USBCMD.R/S
 
