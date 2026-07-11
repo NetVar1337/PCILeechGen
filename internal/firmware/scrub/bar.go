@@ -196,25 +196,24 @@ func xhciClampPorts(capLen, maxPorts, bramSize int) int {
 	return maxPorts
 }
 
-// xhciSetOperationalState makes the controller look like it's running.
-func xhciSetOperationalState(data []byte, capLen, maxSlots int) {
+// xhciSetOperationalState resets the controller to the host-owned halted state.
+func xhciSetOperationalState(data []byte, capLen, _ int) {
+	util.WriteLE32(data, capLen+0x08, 0x01) // 4KB pages
 
-	util.WriteLE32(data, capLen+0x08, 0x01)
-
-	util.WriteLE32(data, capLen+0x14, 0x00)
+	// CRCR/DCBAAP/CONFIG are host-programmed after reset.
 	util.WriteLE32(data, capLen+0x18, 0x00)
 	util.WriteLE32(data, capLen+0x1C, 0x00)
-
-	config := util.ReadLE32(data, capLen+0x38)
-	config = (config & 0xFFFFFF00) | uint32(maxSlots)
-	util.WriteLE32(data, capLen+0x38, config)
+	util.WriteLE32(data, capLen+0x30, 0x00)
+	util.WriteLE32(data, capLen+0x34, 0x00)
+	util.WriteLE32(data, capLen+0x38, 0x00)
 
 	usbcmd := util.ReadLE32(data, capLen)
-	usbcmd |= 0x01
-	usbcmd &= ^uint32(0x02)
+	usbcmd &^= uint32(0x03) // R/S=0, HCRST=0
 	util.WriteLE32(data, capLen, usbcmd)
 
 	usbsts := util.ReadLE32(data, capLen+4)
-	usbsts &= ^uint32(0x01 | 0x04)
+	usbsts &^= uint32(0x04) // clear host-system error
+	usbsts |= 0x01          // HCHalted=1
 	util.WriteLE32(data, capLen+4, usbsts)
+
 }

@@ -1,59 +1,83 @@
-problem: "device data collection failed" / BAR reads all 0xFF
-cause: donor is in D3 sleep, IOMMU is off, or the donor is not bound to vfio-pci.
-fix: enable IOMMU in GRUB (intel_iommu=on / amd_iommu=on iommu=pt), update-grub
-     + reboot, wake the device to D0, bind it to vfio-pci, turn Secure Boot off.
+PCILeechGen failure catalogue
+=============================
 
-problem: "VFIO_GROUP_SET_CONTAINER: invalid argument"
-cause: the donor shares its IOMMU group with devices still on native drivers.
-fix: move the whole group to vfio-pci, or isolate the donor (ACS).
+Run `sudo pcileechgen doctor --bdf <BDF>` before changing host security,
+kernel, BIOS, VFIO, or firmware settings. A Windows Code 10 is a terminal
+symptom; fix the first failed boundary below.
 
-problem: PC crashes / hard reboot during build
-cause: a memory conflict - usually the OS/boot drive got bound to VFIO, or a
-       shared group. Look for MCE / "probe failed -22" in journalctl.
-fix: never bind the drive you boot from; use a separate donor; isolate the group.
+HOST-IOMMU-001 — IOMMU is not ready
+  Evidence: required kernel parameter missing or no IOMMU groups exist.
+  Action: enable intel_iommu=on or amd_iommu=on with iommu=pt, reboot, and
+          verify /sys/kernel/iommu_groups. Do not use ACS override as a
+          substitute for physical DMA isolation without understanding that it
+          changes grouping, not hardware isolation.
 
-problem: "card in sleep mode"
-cause: runtime PM or the host driver keeps the donor in D3.
-fix: disable runtime PM, keep the donor in D0, bind it to vfio-pci.
+HOST-BOOT-002 — live or overlay Linux root
+  Evidence: root filesystem is overlay/squashfs.
+  Action: use a persistent Linux installation for disruptive VFIO work.
 
-problem: Live / USB-boot Ubuntu
-cause: live-USB + VFIO is unreliable.
-fix: do a real install to disk.
+VFIO-DRIVER-001 — donor is not bound to vfio-pci
+  Action: use `pcileechgen vfio prepare`; retain its restoration state file.
 
-problem: Vivado "exit status 1" / "Invalid XML token"
-cause: a corrupted Vivado install (device parts / XML), not the tool.
-fix: reinstall Vivado cleanly; --skip-vivado proves the artifacts are fine.
+VFIO-GROUP-001 — mixed IOMMU group
+  Evidence: one or more group members remain on native drivers.
+  Action: prepare the complete safe group or use a physically isolated slot.
+          Never bind a root controller, active display, input controller, or
+          default-route NIC merely to make the group viable.
 
-problem: Vivado license lost under sudo
-cause: sudo strips PATH / XILINXD_LICENSE_FILE.
-fix: pass them back: sudo env PATH="$PATH" XILINXD_LICENSE_FILE="$..." \
-     ./bin/pcileechgen build ...  (latest build also recovers them itself)
+POWER-D3-001 — donor is not in D0
+  Action: inspect with `pcileechgen power status`; use `power wake` only when
+          the device is not host-critical. Some donors require their native
+          driver to initialize them before transfer to vfio-pci.
 
-problem: donor BAR > board BRAM -> [FAIL]
-cause: the donor BAR is bigger than the board can emulate.
-fix: pick a smaller-BAR donor or a bigger board
+BAR-READ-FF-001 — mapped BAR samples are uniformly 0xFF
+  Check in order: D0 state, group viability, mapping method, reset state,
+                  native-driver initialization, PCIe AER/link errors.
+  Do not diagnose a complete BAR from a single DWORD.
 
-problem: Windows Code 10 "cannot start"  (most common report)
-cause: the clone loads but doesn't behave like the real device BAR0 reads FF,
-       MSI-X/interrupt setup fails, or device-type emulation is incomplete.
-       Often hidden: stale Windows device history.
-fix: try a nvme / network / audio / wifi donor first (xHCI hit Code 10 until
-     done); run tools/cleanup_device_history.ps1 (Admin) then reboot; Core
-     Isolation off; correct BIOS.
+BAR-BRAM-002 — donor BAR exceeds board BRAM
+  Action: use a smaller-aperture donor or a board with sufficient BRAM. Force
+          mode truncates behavior and is not a compatibility fix.
 
-problem: stale device metadata / wrong driver after reflash
-cause: Windows caches PCI device info in the registry.
-fix: run the bundled cleanup_device_history utility, reboot, reconnect.
+VIVADO-ENV-001 / VIVADO-VERSION-001
+  Action: verify the selected executable and supported version.
 
-problem: yellow triangle / device not recognized after flash
-cause: a partial flash image, or the device needs repo enhancements.
-fix: rewrite the firmware with a working flasher; get a steady green light first.
+VIVADO-LICENSE-002
+  Evidence: license environment is absent after privilege transition.
+  Action: preserve XILINXD_LICENSE_FILE or LM_LICENSE_FILE through sudo.
 
-problem: lone-dma-test shows BAD DTB / can't find ntoskrnl
-cause: usually BIOS / Windows DMA settings, not the firmware.
-fix: recheck BIOS + Windows settings; compare to a known-good firmware.
+VIVADO-XML-001
+  Evidence: a named Vivado device XML file fails parsing.
+  Action: repair or reinstall the affected device files. `--skip-vivado`
+          separates generated-artifact correctness from synthesis failures.
 
+FLASH-MANIFEST-005 — artifact differs from build manifest
+  Action: stop. Rebuild or reflash only after `pcileechgen flash verify` passes.
+  A board LED is not proof of complete or correct programming.
 
-Note (not a bug): xHCI (USB) emulation is partial.
-Clones enumerate, but host read/write + doorbell gaps remain, so USBXHCI often
-hits Code 10 (e.g. VIA VL805). Targeted this cycle.
+Windows Code 10
+---------------
+Collect bounded PnP evidence with:
+
+  powershell -ExecutionPolicy Bypass -File tools/collect_device_diagnostics.ps1 \
+    -HardwareId 'PCI\VEN_xxxx&DEV_xxxx'
+
+Classify before cleanup:
+  WIN-PNP-DRIVER-001     no matching driver
+  WIN-PNP-RESOURCE-002   resource assignment failed
+  WIN-PNP-START-003      driver initialization failed
+  WIN-PNP-RESET-004      reset handshake timed out
+  WIN-PNP-INTERRUPT-005  MSI/MSI-X initialization failed
+  WIN-PNP-STALE-006      conflicting stale device instances
+
+Use cleanup_device_history only for WIN-PNP-STALE-006. Do not disable Secure
+Boot or Core Isolation as a generic response to incorrect BAR, reset, or
+interrupt behavior.
+
+xHCI status
+-----------
+xHCI initialization requires host-owned halted reset state, HCRST/CNR
+sequencing, Run/Stop to HCHalted transitions, DCBAAP/CRCR/CONFIG programming,
+command/event rings, doorbells, and interrupts. Enumeration alone does not
+prove xHCI compatibility. Compare donor and emulator sessions with
+`pcileechgen validate-init` and fix the first divergence.

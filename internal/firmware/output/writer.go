@@ -641,16 +641,16 @@ func (ow *OutputWriter) writeConditionalArtifacts(cfg *svgen.SVGeneratorConfig, 
 		if err != nil {
 			return fmt.Errorf("generating pcileech_nvme_dma_bridge.sv: %w", err)
 		}
-		if err := ow.writeFile("pcileech_nvme_dma_bridge.sv", bridgeSV); err != nil {
-			return err
+		if writeErr := ow.writeFile("pcileech_nvme_dma_bridge.sv", bridgeSV); writeErr != nil {
+			return writeErr
 		}
 
 		diskSV, err := svgen.GenerateNVMeBRAMDiskSV(cfg)
 		if err != nil {
 			return fmt.Errorf("generating pcileech_bram_disk.sv: %w", err)
 		}
-		if err := ow.writeFile("pcileech_bram_disk.sv", diskSV); err != nil {
-			return err
+		if writeErr := ow.writeFile("pcileech_bram_disk.sv", diskSV); writeErr != nil {
+			return writeErr
 		}
 
 		if err := ow.writeFile("identify_init.hex", nvme.IdentifyDataToHex(cfg.NVMeIdentify)); err != nil {

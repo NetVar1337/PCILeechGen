@@ -75,6 +75,11 @@ COMMANDS
   validate         verify artifacts match the donor context
   verify-manifest  check SHA256 integrity of build output
   mmio-trace       capture live or import saved BAR MMIO access traces
+  doctor           diagnose host, VFIO, power, BAR, and Vivado readiness
+  vfio             transactionally prepare or restore an IOMMU group
+  power            inspect or recover donor D0 state
+  flash verify     verify bitstream artifacts against the build manifest
+  validate-init    compare donor and emulator initialization sessions
   boards           list supported FPGA boards
   version          print version
 
@@ -118,6 +123,21 @@ COMMANDS
   manifest. Disruptive scenarios refuse the active default-route NIC unless
   --force-session is explicitly supplied. Run them only on authorized lab
   hardware from a recoverable local console.
+
+  Reliability workflow:
+    sudo pcileechgen doctor --bdf 0000:03:00.0 --vivado vivado
+    sudo pcileechgen vfio prepare --bdf 0000:03:00.0 \
+      --state pcileech_vfio_state.json
+    sudo pcileechgen power status --bdf 0000:03:00.0
+    pcileechgen flash verify --manifest pcileech_datastore/build_manifest.json \
+      --output-dir pcileech_datastore
+    pcileechgen validate-init --donor captures/donor-01 \
+      --emulator captures/fpga-01
+
+  `vfio prepare`, `power wake`, and disruptive trace scenarios reject known
+  root-filesystem and default-route devices. Keep the VFIO state file until
+  native drivers are restored. Diagnostic codes and evidence-based recovery
+  guidance are listed in KNOWN_ISSUES.
 
 
 FEATURES

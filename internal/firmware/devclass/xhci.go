@@ -18,10 +18,10 @@ func (s *xhciStrategy) ScrubBAR(data []byte) {
 		return
 	}
 	usbcmd := util.ReadLE32(data, 0x20)
-	usbcmd |= 0x01
+	usbcmd &^= 0x03 // reset with Run/Stop and HCRST clear
 	util.WriteLE32(data, 0x20, usbcmd)
 
-	util.WriteLE32(data, 0x24, 0x00000000)
+	util.WriteLE32(data, 0x24, 0x00000001) // HCHalted until host configures and starts
 
 	if len(data) > 0x2C {
 		util.WriteLE32(data, 0x28, 0x00000001)
@@ -41,10 +41,10 @@ func (s *xhciStrategy) ScrubBAR(data []byte) {
 
 func (s *xhciStrategy) PostInitRegisters(regs map[uint32]*uint32) {
 	if v, ok := regs[0x20]; ok {
-		*v |= 0x00000001
+		*v &^= 0x00000003
 	}
 	if v, ok := regs[0x24]; ok {
-		*v &^= 0x00000001
+		*v |= 0x00000001
 	}
 }
 
@@ -88,10 +88,10 @@ func xhciProfile() *DeviceProfile {
 			// RTSOFF - runtime register space offset
 			{Offset: 0x18, Width: 4, Name: "RTSOFF", Reset: 0x00000200, RWMask: 0x00000000},
 			// Operational registers (at CAPLENGTH offset 0x20)
-			// USBCMD - R/S=1 (running)
-			{Offset: 0x20, Width: 4, Name: "USBCMD", Reset: 0x00000001, RWMask: 0x00001F0F},
-			// USBSTS - HCH=0 (not halted); status bits 2,3,4,10 are write-1-to-clear
-			{Offset: 0x24, Width: 4, Name: "USBSTS", Reset: 0x00000000, RWMask: 0x00000000, W1CMask: 0x0000041C},
+			// USBCMD - reset with R/S=0 and HCRST=0; host driver owns transitions.
+			{Offset: 0x20, Width: 4, Name: "USBCMD", Reset: 0x00000000, RWMask: 0x00001F0F},
+			// USBSTS - HCH=1 (halted); status bits 2,3,4,10 are write-1-to-clear.
+			{Offset: 0x24, Width: 4, Name: "USBSTS", Reset: 0x00000001, RWMask: 0x00000000, W1CMask: 0x0000041C},
 			// PAGESIZE - 4KB pages
 			{Offset: 0x28, Width: 4, Name: "PAGESIZE", Reset: 0x00000001, RWMask: 0x00000000},
 			// DNCTRL - device notification control
@@ -109,6 +109,6 @@ func xhciProfile() *DeviceProfile {
 		},
 
 		Notes: "xHCI 1.1 profile. HCCPARAMS1 bit 0 = AC64 (64-bit capable). " +
-			"PORTSC powered+PP with no device attached. USBCMD R/S=1, USBSTS HCH=0.",
+			"PORTSC powered+PP with no device attached. Controller resets halted and host-owned.",
 	}
 }
